@@ -12,25 +12,117 @@
 #include <Rinternals.h>
 #include <R_ext/Applic.h>
 
+#include "sexp_macros.h"
+
+#define ALLOC_REAL_VECTOR(S, D, N)		       \
+    SEXP S;					       \
+    PROTECT(S = allocVector(REALSXP, N));	       \
+    double *D = REAL(S);
+
 #ifndef MAX
 #define MAX(A, B) ((A>B)?(A):(B))
 #endif
 
-#define UNPACK_REAL_VECTOR(S, D, N)		\
-  double *D = REAL(S);				\
-  R_len_t N = length(S);
+/*
+ * These routines calculate the expected value and variance of the
+ * left, right and doubly truncated normal distribution. The only
+ * tricky bit is the calculation of the variance of the doubly
+ * truncated normal distribution. We use a decompostion of the
+ * variance of a mixture of distributions to here for numerical
+ * reasons. For details see:
+ * 
+ *   Foulley JL. A completion simulator for the two-sided truncated
+ *   normal distribution. Genetics, selection, evolution 2000
+ *   Nov-Dec;32(6): p. 631-635.
+ */
+static R_INLINE double e_lefttruncnorm(double a, double mean, double sd) {
+    const double alpha = (a - mean) / sd;
+    const double phi_a = dnorm(alpha, 0.0, 1.0, FALSE);
+    const double Phi_a = pnorm(alpha, 0.0, 1.0, TRUE, FALSE);
+    double res = mean + sd * (phi_a / (1.0 - Phi_a));
+    return res;	
+}
 
-#define UNPACK_INTEGER_VECTOR(S, I, N)		\
-  int *I = INTEGER(S);				\
-  R_len_t N = length(S);
+static R_INLINE double e_truncnorm(double a, double b, double mean, double sd) {
+    const double alpha = (a - mean) / sd;
+    const double beta = (b - mean) / sd;
 
-#define ALLOC_REAL_VECTOR(S, D, N)		\
-  SEXP S;					\
-  PROTECT(S = allocVector(REALSXP, N));		\
-  double *D = REAL(S);
-
+    const double phi_a = dnorm(alpha, 0.0, 1.0, FALSE);
+    const double Phi_a = pnorm(alpha, 0.0, 1.0, TRUE, FALSE);
+    const double phi_b = dnorm(beta, 0.0, 1.0, FALSE);
+    const double Phi_b = pnorm(beta, 0.0, 1.0, TRUE, FALSE);
+    return mean + sd * (phi_b - phi_a) / ( Phi_a - Phi_b);
+}
 
-SEXP dtruncnorm(SEXP s_x, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
+static R_INLINE double e_righttruncnorm(double b, double mean, double sd) {
+    const double beta = (b - mean) / sd;
+    const double phi_b = dnorm(beta, 0.0, 1.0, FALSE);
+    const double Phi_b = pnorm(beta, 0.0, 1.0, TRUE, FALSE);
+    return mean + sd * (-phi_b / Phi_b);
+}
+
+static R_INLINE double v_lefttruncnorm(double a, double mean, double sd) {
+    const double alpha = (a - mean) / sd;
+    const double phi_a = dnorm(alpha, 0.0, 1.0, FALSE);
+    const double Phi_a = pnorm(alpha, 0.0, 1.0, TRUE, FALSE);
+    const double lambda = phi_a / (1.0 - Phi_a);
+    return (sd*sd*(1.0 - lambda * (lambda - alpha)));
+}
+
+static R_INLINE double v_righttruncnorm(double b, double mean, double sd) {
+    return (v_lefttruncnorm(-b, -mean, sd));
+}
+
+static R_INLINE double v_truncnorm(double a, double b, double mean, double sd) {
+    const double pi1 = pnorm(a, mean, sd, TRUE, FALSE);
+    const double pi2 = pnorm(b, mean, sd, TRUE, FALSE) - pnorm(a, mean, sd, TRUE, FALSE);
+    const double pi3 = pnorm(b, mean, sd, FALSE, FALSE); /* 1 - F(b) */
+
+    const double e1 = e_righttruncnorm(a, mean, sd);
+    const double e2 = e_truncnorm(a, b, mean, sd);
+    const double e3 = e_lefttruncnorm(b, mean, sd);
+
+    const double v  = sd * sd;
+    const double v1 = v_righttruncnorm(a, mean, sd);
+    const double v3 = v_lefttruncnorm(b, mean, sd);    
+
+    const double c1 = pi1 * (v1 + (e1 - mean)*(e1 - mean));
+    const double c3 = pi3 * (v3 + (e3 - mean)*(e3 - mean));
+
+    return (v - c1 - c3) / pi2 - (e2 - mean)*(e2 - mean);
+}
+
+static R_INLINE double ptruncnorm(const double q, const double a, const double b, const double mean, const double sd) {
+    if (q < a) {
+	return 0.0;
+    } else if (q > b) {
+	return 1.0;
+    } else {
+      const double c1 = pnorm(q, mean, sd, TRUE, FALSE);
+      const double c2 = pnorm(a, mean, sd, TRUE, FALSE);
+      const double c3 = pnorm(b, mean, sd, TRUE, FALSE);
+      return (c1 - c2) / (c3 - c2);	
+    }
+}
+
+typedef struct {
+    double a, b, mean, sd, p;
+} qtn;
+
+/* qtmin - helper function to calculate quantiles of the truncated
+ *   normal distribution.
+ *
+ * The root of this function is the desired quantile, given that *p
+ * defines a truncated normal distribution and the desired
+ * quantile. This function increases monotonically in x and is
+ * positive for x=a and negative for x=b if 0 < p < 1.
+ */
+double qtmin(double x, void *p) {
+    qtn *t = (qtn *)p;
+    return ptruncnorm(x, t->a, t->b, t->mean, t->sd) - t->p;
+}
+
+SEXP do_dtruncnorm(SEXP s_x, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
   R_len_t i, n;
   UNPACK_REAL_VECTOR(s_x   , x   , n_x);
   UNPACK_REAL_VECTOR(s_a   , a   , n_a);
@@ -57,13 +149,13 @@ SEXP dtruncnorm(SEXP s_x, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
     } else { /* Truncated: */
       ret[i] = 0.0;
     }
+    R_CheckUserInterrupt();
   }
   UNPROTECT(1); /* s_ret */
   return s_ret;
 }
-
 
-SEXP ptruncnorm(SEXP s_q, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
+SEXP do_ptruncnorm(SEXP s_q, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
   R_len_t i, n;
   UNPACK_REAL_VECTOR(s_q   , q   , n_q);
   UNPACK_REAL_VECTOR(s_a   , a   , n_a);
@@ -78,87 +170,68 @@ SEXP ptruncnorm(SEXP s_q, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
     const double cq = q[i % n_q];
     const double ca = a[i % n_a];
     const double cb = b[i % n_b];
-    if (cq < ca) {
-      ret[i] = 0.0;
-    } else if (cq > cb) {
-      ret[i] = 1.0;
-    } else {
-      const double cmean = mean[i % n_mean];
-      const double csd = sd[i % n_sd];
-      const double c1 = pnorm(cq, cmean, csd, TRUE, FALSE);
-      const double c2 = pnorm(ca, cmean, csd, TRUE, FALSE);
-      const double c3 = pnorm(cb, cmean, csd, TRUE, FALSE);
-      ret[i] = (c1 - c2) / (c3 - c2);
-    }
-  }
-  UNPROTECT(1); /* s_ret */
-  return s_ret;
-}
-
-
-SEXP rtruncnorm(SEXP s_n, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
-  R_len_t i, nn;
-  UNPACK_INTEGER_VECTOR(s_n   , n   , n_n);
-  UNPACK_REAL_VECTOR   (s_a   , a   , n_a);
-  UNPACK_REAL_VECTOR   (s_b   , b   , n_b);
-  UNPACK_REAL_VECTOR   (s_mean, mean, n_mean);
-  UNPACK_REAL_VECTOR   (s_sd  , sd  , n_sd);
-  
-  nn = MAX(MAX(MAX(n[0], n_n), MAX(n_a, n_b)), MAX(n_mean, n_sd));
-  
-  ALLOC_REAL_VECTOR(s_ret, ret, nn);
-  GetRNGstate();
-  for (i = 0; i < nn; ++i) {
-    const double ca = a[i % n_a];
-    const double cb = b[i % n_b];
     const double cmean = mean[i % n_mean];
     const double csd = sd[i % n_sd];
-    double tmp;
-    /* Rejection sampling until we generate an observation that is not
-     * truncated. This can be slow for narrow and extreme intervals
-     * [a,b].
-     */
-    while (1) { 
-      tmp = rnorm(cmean, csd);
-      if (ca <= tmp && tmp <= cb)
-	break;
-    }
-    ret[i] = tmp;
+    ret[i] = ptruncnorm(cq, ca, cb, cmean, csd);
+    R_CheckUserInterrupt();
   }
-  PutRNGstate();
   UNPROTECT(1); /* s_ret */
   return s_ret;
 }
-
 
-SEXP etruncnorm(SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
+SEXP do_qtruncnorm(SEXP s_p, SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
   R_len_t i, n;
+  qtn t;
+  double tol;
+  int maxit;
+  UNPACK_REAL_VECTOR(s_p   , p   , n_p);
   UNPACK_REAL_VECTOR(s_a   , a   , n_a);
   UNPACK_REAL_VECTOR(s_b   , b   , n_b);
   UNPACK_REAL_VECTOR(s_mean, mean, n_mean);
   UNPACK_REAL_VECTOR(s_sd  , sd  , n_sd);
-
-  n = MAX(MAX(n_a, n_b), MAX(n_mean, n_sd));
-  ALLOC_REAL_VECTOR(s_ret, ret, n);
   
-  for (i = 0; i < n_a; ++i) {
+  n = MAX(MAX(MAX(n_p, n_a), MAX(n_b, n_mean)), n_sd);  
+  ALLOC_REAL_VECTOR(s_ret, ret, n);
+
+  for (i = 0; i < n; ++i) {
+    const double cp = p[i % n_p];
     const double ca = a[i % n_a];
     const double cb = b[i % n_b];
     const double cmean = mean[i % n_mean];
     const double csd = sd[i % n_sd];
-    
-    const double c1 = dnorm((ca-cmean)/csd, 0.0, 1.0, FALSE);
-    const double c2 = dnorm((cb-cmean)/csd, 0.0, 1.0, FALSE);
-    const double C1 = pnorm(ca, cmean, csd, TRUE, FALSE);
-    const double C2 = pnorm(cb, cmean, csd, TRUE, FALSE);   
-    ret[i] = cmean + csd * ((c1 - c2) / (C2 - C1));
+    if (cp == 0.0) {
+	ret[i] = ca;
+    } else if (cp == 1.0) {
+	ret[i] = cb;
+    } else if (cp < 0.0 || cp > 1.0) {
+	ret[i] = R_NaN;
+    } else if (ca == R_NegInf && cb == R_PosInf) {
+	ret[i] = qnorm(cp, cmean, csd, TRUE, FALSE);
+    } else {
+	/* We need to possible adjust ca and cb for R_zeroin(),
+	 * because R_zeroin() requires finite bounds and ca or cb (but
+	 * not both, see above) may be infinite. In that case, we use
+	 * a simple stepping out procedure to find a lower or upper
+	 * bound from which to begin the search.
+	 */
+	double lower = ca, upper = cb; 
+	if (lower == R_NegInf) { 
+	    lower = -1;
+	    while(ptruncnorm(lower, ca, cb, cmean, csd) - cp >= 0) lower *= 2.0; 
+	} else if (upper == R_PosInf) { 
+	    upper = 1;
+	    while(ptruncnorm(upper, ca, cb, cmean, csd) - cp <= 0) upper *= 2.0; 
+	} 
+	t.a = ca; t.b = cb; t.mean = cmean; t.sd = csd; t.p = cp; maxit = 50; 
+	ret[i] = R_zeroin(lower, upper, &qtmin, &t, &tol, &maxit); 
+    }
+    R_CheckUserInterrupt();
   } 
   UNPROTECT(1); /* s_ret */
   return s_ret;
 }
-
 
-SEXP vtruncnorm(SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
+SEXP do_etruncnorm(SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
   R_len_t i, n;
   UNPACK_REAL_VECTOR(s_a   , a   , n_a);
   UNPACK_REAL_VECTOR(s_b   , b   , n_b);
@@ -168,24 +241,57 @@ SEXP vtruncnorm(SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
   n = MAX(MAX(n_a, n_b), MAX(n_mean, n_sd));
   ALLOC_REAL_VECTOR(s_ret, ret, n);
   
-  for (i = 0; i < n_a; ++i) {
+  for (i = 0; i < n; ++i) {
     const double ca = a[i % n_a];
     const double cb = b[i % n_b];
     const double cmean = mean[i % n_mean];
     const double csd = sd[i % n_sd];
-    const double am = (ca - cmean)/csd;
-    const double bm = (cb - cmean)/csd;
-    const double c1 = dnorm(am, 0.0, 1.0, FALSE);
-    const double c2 = dnorm(bm, 0.0, 1.0, FALSE);
-    const double C1 = pnorm(ca, cmean, csd, TRUE, FALSE);
-    const double C2 = pnorm(cb, cmean, csd, TRUE, FALSE);   
+
+    if (R_FINITE(ca) && R_FINITE(cb)) {
+	ret[i] = e_truncnorm(ca, cb, cmean, csd);
+    } else if (R_NegInf == ca && R_FINITE(cb)) {
+	ret[i] = e_righttruncnorm(cb, cmean, csd);
+    } else if (R_FINITE(ca) && R_PosInf == cb) {
+	ret[i] = e_lefttruncnorm(ca, cmean, csd);
+    } else if (R_NegInf == ca && R_PosInf == cb) {
+	ret[i] = cmean;
+    } else {
+	ret[i] = NA_REAL;
+    }
+    R_CheckUserInterrupt();
+  }
+  UNPROTECT(1); /* s_ret */
+  return s_ret;  
+}
+
+SEXP do_vtruncnorm(SEXP s_a, SEXP s_b, SEXP s_mean, SEXP s_sd) {
+  R_len_t i, n;
+  UNPACK_REAL_VECTOR(s_a   , a   , n_a);
+  UNPACK_REAL_VECTOR(s_b   , b   , n_b);
+  UNPACK_REAL_VECTOR(s_mean, mean, n_mean);
+  UNPACK_REAL_VECTOR(s_sd  , sd  , n_sd);
+
+  n = MAX(MAX(n_a, n_b), MAX(n_mean, n_sd));
+  ALLOC_REAL_VECTOR(s_ret, ret, n);
   
-    const double v  = csd * csd;
-    
-    const double d = C2 - C1;
-    const double m1 = (c1 - c2)/d;
-    const double m2 = (am*c1 - bm*c2)/d;
-    ret[i] = (1.0 + m2 + m1*m1)*v;
+  for (i = 0; i < n; ++i) {
+    const double ca = a[i % n_a];
+    const double cb = b[i % n_b];
+    const double cmean = mean[i % n_mean];
+    const double csd = sd[i % n_sd];
+
+    if (R_FINITE(ca) && R_FINITE(cb)) {
+	ret[i] = v_truncnorm(ca, cb, cmean, csd);
+    } else if (R_NegInf == ca && R_FINITE(cb)) {
+	ret[i] = v_righttruncnorm(cb, cmean, csd);
+    } else if (R_FINITE(ca) && R_PosInf == cb) {
+	ret[i] = v_lefttruncnorm(ca, cmean, csd);
+    } else if (R_NegInf == ca && R_PosInf == cb) {
+	ret[i] = csd * csd;
+    } else {
+	ret[i] = NA_REAL;
+    }
+    R_CheckUserInterrupt();
   }
   UNPROTECT(1); /* s_ret */
   return s_ret;
