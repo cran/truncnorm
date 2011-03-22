@@ -1,5 +1,5 @@
 Package: truncnorm
-Version: 1.0-4
+Version: 1.0-5
 Title: Truncated normal distribution
 Description: r/d/p/q functions for the truncated normal distribution
 Author: Heike Trautmann <trautmann@statistik.uni-dortmund.de> and
@@ -8,10 +8,11 @@ Author: Heike Trautmann <trautmann@statistik.uni-dortmund.de> and
         <bornkamp@statistik.tu-dortmund.de>
 Maintainer: Olaf Mersmann <olafm@statistik.uni-dortmund.de>
 Depends: R (>= 2.10.0)
+Suggests: RUnit
 License: GPL-2
 LazyData: yes
 Encoding: UTF-8
 Date:
-Packaged: 2010-05-28 22:01:23 UTC; olafm
+Packaged: 2011-03-22 13:39:41 UTC; olafm
 Repository: CRAN
-Date/Publication: 2010-05-29 08:02:12
+Date/Publication: 2011-03-22 14:21:17
