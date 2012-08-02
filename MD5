@@ -1,0 +1,10 @@
+a125eb00c9bea80f0a36b5b40607cedd *DESCRIPTION
+0879f76a5d80c03131ef22412150ee15 *NAMESPACE
+b1ae7a18e2a37ef976476ad504b8b4d6 *R/truncnorm.R
+43aaf800b50d70e17f63510a0d9edaf4 *man/dtruncnorm.Rd
+2ba97687fc03bf61d55221a85afa5946 *src/rtruncnorm.c
+7c8d34cbe1c7a0e2783663e7ffb9327b *src/sexp_macros.h
+3be7b1209751884891dfd1912f38e3be *src/truncnorm.c
+06773d795a2fed9b539f1c248d12437a *src/zeroin.c
+dd074a0f18f05dda52777a57fd481e51 *src/zeroin.h
+768fe3c44063a1f13340084441bf40ba *tests/sanity_checks.R
